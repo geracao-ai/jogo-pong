@@ -1,57 +1,113 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Pong Game</title>
     <style>
-        body {
+        html, body {
             margin: 0;
             padding: 0;
+            height: 100%;
+            overflow: hidden;
+            overscroll-behavior: none;
+        }
+        body {
+            position: fixed;
+            inset: 0;
             background-color: #222;
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+        }
+        /* Stage is the area free of notch and home indicator; the canvas is fitted inside it by JS. */
+        #stage {
+            position: absolute;
+            inset: 0;
+            box-sizing: border-box;
+            padding: max(6px, env(safe-area-inset-top)) max(6px, env(safe-area-inset-right))
+                     max(6px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
             display: flex;
             justify-content: center;
             align-items: center;
-            height: 100vh;
-            color: #fff;
-            font-family: 'Courier New', Courier, monospace;
+        }
+        #stageArea {
+            width: 100%;
+            height: 100%;
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
         }
         canvas {
+            display: block;
+            box-sizing: border-box;
             background-color: #000;
             border: 2px solid #fff;
             box-shadow: 0 0 20px rgba(255, 255, 255, 0.2);
         }
-        #score {
-            position: absolute;
-            top: 20px;
-            font-size: 40px;
-            font-weight: bold;
-            width: 100%;
-            text-align: center;
-            pointer-events: none;
-        }
         #controls {
             position: absolute;
-            bottom: 20px;
+            bottom: 12px;
+            left: 0;
+            right: 0;
             text-align: center;
             color: #aaa;
             font-size: 14px;
+            pointer-events: none;
         }
+        #startOverlay {
+            position: absolute;
+            inset: 0;
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+            padding: 24px;
+            box-sizing: border-box;
+            text-align: center;
+            background-color: rgba(0, 0, 0, 0.75);
+        }
+        #startOverlay h1 { margin: 0; font-size: 28px; }
+        #startOverlay p { margin: 0; color: #ccc; font-size: 16px; line-height: 1.4; }
+        #startOverlay #tiltWarning { display: none; color: #fc6; }
+        .noTilt #startOverlay #tiltWarning { display: block; }
+        .touch #startOverlay { display: flex; }
+        .touch.playing #startOverlay { display: none; }
+        .touch #controls { display: none; }
     </style>
 </head>
 <body>
-    <div id="score"><span id="playerScore">0</span> - <span id="aiScore">0</span></div>
-    <canvas id="pongCanvas" width="800" height="400"></canvas>
-    <div id="controls">Player 1: W/S or Up/Down Arrows</div>
+    <div id="stage"><div id="stageArea"><canvas id="pongCanvas" width="800" height="400"></canvas></div></div>
+    <div id="controls">Jogador: W/S ou setas ↑/↓</div>
+    <div id="startOverlay">
+        <h1>Toque para jogar</h1>
+        <p>Incline o celular para mover sua barra.<br>Você também pode arrastar o dedo na tela.</p>
+        <p id="tiltWarning">Inclinação indisponível neste endereço: ela só funciona em HTTPS. Use o dedo.</p>
+    </div>
 
     <script>
         const canvas = document.getElementById("pongCanvas");
         const ctx = canvas.getContext("2d");
+        const stageArea = document.getElementById("stageArea");
+
+        // Game logic always uses this fixed field; only the drawing is scaled or rotated
+        const FIELD_WIDTH = 800;
+        const FIELD_HEIGHT = 400;
+        const PADDLE_WIDTH = 20;
+        const PADDLE_MARGIN = 12; // Gap to the back wall, so the paddle never blends into the border
+
+        const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
 
         // Game objects
         const ball = {
-            x: canvas.width / 2,
-            y: canvas.height / 2,
+            x: FIELD_WIDTH / 2,
+            y: FIELD_HEIGHT / 2,
             radius: 10,
             speed: 5,
             velocityX: 5,
@@ -60,9 +116,9 @@
         };
 
         const player = {
-            x: 0,
-            y: canvas.height / 2 - 50,
-            width: 10,
+            x: PADDLE_MARGIN,
+            y: FIELD_HEIGHT / 2 - 50,
+            width: PADDLE_WIDTH,
             height: 100,
             color: "WHITE",
             score: 0,
@@ -70,9 +126,9 @@
         };
 
         const ai = {
-            x: canvas.width - 10,
-            y: canvas.height / 2 - 50,
-            width: 10,
+            x: FIELD_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH,
+            y: FIELD_HEIGHT / 2 - 50,
+            width: PADDLE_WIDTH,
             height: 100,
             color: "WHITE",
             score: 0,
@@ -91,6 +147,7 @@
         window.addEventListener("keydown", (e) => {
             if (keys.hasOwnProperty(e.key)) {
                 keys[e.key] = true;
+                e.preventDefault(); // Arrow keys must not scroll the page
             }
         });
 
@@ -99,6 +156,146 @@
                 keys[e.key] = false;
             }
         });
+
+        // Layout: fit the field to the screen. On a phone held upright the field is
+        // rotated, so the player sits at the bottom and uses the whole screen.
+        const view = { rotated: false, angle: 0, scale: 1, dpr: 1 };
+
+        function resize() {
+            const free = stageArea.getBoundingClientRect();
+            const border = 4; // 2px canvas border on each side
+            const rotated = isTouchDevice && free.height > free.width;
+            const fieldW = rotated ? FIELD_HEIGHT : FIELD_WIDTH;
+            const fieldH = rotated ? FIELD_WIDTH : FIELD_HEIGHT;
+
+            let scale = Math.min((free.width - border) / fieldW, (free.height - border) / fieldH);
+            if (!isTouchDevice) scale = Math.min(scale, 1); // Keep desktop at its original size
+
+            const angle = screenAngle();
+            const orientationChanged = rotated !== view.rotated || angle !== view.angle;
+            view.rotated = rotated;
+            view.angle = angle;
+            view.scale = scale;
+            view.dpr = window.devicePixelRatio || 1;
+
+            canvas.style.width = fieldW * scale + border + "px";
+            canvas.style.height = fieldH * scale + border + "px";
+            canvas.width = Math.round(fieldW * scale * view.dpr);
+            canvas.height = Math.round(fieldH * scale * view.dpr);
+
+            if (orientationChanged) {
+                // The last reading was measured along the old axis
+                tilt.angle = null;
+                tilt.neutral = null;
+            }
+            render();
+        }
+
+        // Tilt: the paddle position follows the phone's tilt, relative to a neutral pose
+        const TILT_RANGE = 18; // Degrees from neutral needed to reach the end of the field
+        const tilt = { angle: null, neutral: null };
+
+        function paddleTravel() {
+            return FIELD_HEIGHT - player.height;
+        }
+
+        function tiltToPaddleY(degrees) {
+            return (degrees / TILT_RANGE + 1) / 2 * paddleTravel();
+        }
+
+        function screenAngle() {
+            // window.orientation comes first: it is deprecated but exists on phones and is always
+            // relative to the device, like the sensor. screen.orientation may use another reference.
+            if (typeof window.orientation === "number") return window.orientation;
+            return screen.orientation ? screen.orientation.angle : 0;
+        }
+
+        // deviceorientation is the accelerometer reading already normalized by the browser.
+        // Raw devicemotion gravity has opposite signs on iOS and Android. beta/gamma alone jump
+        // when the phone is near vertical, so they are converted back to a gravity vector here.
+        function readTilt(e) {
+            if (e.beta === null || e.gamma === null) return;
+            const beta = e.beta * Math.PI / 180;
+            const gamma = e.gamma * Math.PI / 180;
+            const downX = Math.cos(beta) * Math.sin(gamma);
+            const downY = -Math.sin(beta);
+
+            // Project gravity on the screen direction the paddle moves along
+            const a = view.angle * Math.PI / 180;
+            const along = view.rotated
+                ? downX * Math.cos(a) - downY * Math.sin(a)    // Screen right
+                : -downX * Math.sin(a) - downY * Math.cos(a);  // Screen down
+            tilt.angle = Math.asin(Math.max(-1, Math.min(1, along))) * 180 / Math.PI;
+        }
+
+        function applyTilt() {
+            if (tilt.angle === null || touchActive) return;
+
+            // A new neutral keeps the paddle where it is, so recentering causes no jump
+            if (tilt.neutral === null) {
+                const paddleDegrees = (player.y / paddleTravel() * 2 - 1) * TILT_RANGE;
+                tilt.neutral = tilt.angle - paddleDegrees;
+            }
+            // Past the end of the range the neutral follows, so tilting back reacts at once
+            tilt.neutral = Math.max(tilt.angle - TILT_RANGE, Math.min(tilt.angle + TILT_RANGE, tilt.neutral));
+
+            const target = tiltToPaddleY(tilt.angle - tilt.neutral);
+            player.y += (target - player.y) * 0.35; // Filters sensor jitter
+        }
+
+        // Touch: drag anywhere to move the paddle directly
+        let touchActive = false;
+
+        function movePaddleToTouch(e) {
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            const position = view.rotated ? touch.clientX - rect.left : touch.clientY - rect.top;
+            const y = position / view.scale - player.height / 2;
+            player.y = Math.max(0, Math.min(paddleTravel(), y));
+        }
+
+        function startGame() {
+            if (running) return;
+            running = true;
+            document.body.classList.add("playing");
+        }
+
+        // iOS only allows the sensor request inside a tap; the game starts whatever the answer is
+        async function enableTilt() {
+            const needsPermission = window.DeviceOrientationEvent
+                && typeof DeviceOrientationEvent.requestPermission === "function";
+            try {
+                if (needsPermission && await DeviceOrientationEvent.requestPermission() !== "granted") return;
+            } catch (err) {
+                return;
+            }
+            window.addEventListener("deviceorientation", readTilt);
+        }
+
+        document.getElementById("startOverlay").addEventListener("click", () => {
+            enableTilt();
+            startGame();
+        });
+
+        window.addEventListener("touchstart", (e) => {
+            if (!running) return;
+            e.preventDefault();
+            touchActive = true;
+            movePaddleToTouch(e);
+        }, { passive: false });
+
+        window.addEventListener("touchmove", (e) => {
+            e.preventDefault();
+            if (running) movePaddleToTouch(e);
+        }, { passive: false });
+
+        function endTouch(e) {
+            if (e.touches.length > 0) return;
+            touchActive = false;
+            tilt.neutral = null;
+        }
+        window.addEventListener("touchend", endTouch);
+        window.addEventListener("touchcancel", endTouch);
 
         // Draw functions
         function drawRect(x, y, w, h, color) {
@@ -115,8 +312,8 @@
         }
 
         function drawNet() {
-            for (let i = 0; i <= canvas.height; i += 15) {
-                drawRect(canvas.width / 2 - 1, i, 2, 10, "WHITE");
+            for (let i = 0; i <= FIELD_HEIGHT; i += 15) {
+                drawRect(FIELD_WIDTH / 2 - 1, i, 2, 10, "WHITE");
             }
         }
 
@@ -136,8 +333,8 @@
         }
 
         function resetBall() {
-            ball.x = canvas.width / 2;
-            ball.y = canvas.height / 2;
+            ball.x = FIELD_WIDTH / 2;
+            ball.y = FIELD_HEIGHT / 2;
             ball.speed = 5;
             ball.velocityX = -Math.sign(ball.velocityX) * 5; // Send ball to other player
             ball.velocityY = 5;
@@ -149,9 +346,11 @@
             if ((keys.w || keys.ArrowUp) && player.y > 0) {
                 player.y -= player.speed;
             }
-            if ((keys.s || keys.ArrowDown) && player.y < canvas.height - player.height) {
+            if ((keys.s || keys.ArrowDown) && player.y < FIELD_HEIGHT - player.height) {
                 player.y += player.speed;
             }
+
+            applyTilt();
 
             // Ball movement
             ball.x += ball.velocityX;
@@ -164,17 +363,20 @@
             
             // Keep AI within canvas
             if (ai.y < 0) ai.y = 0;
-            if (ai.y > canvas.height - ai.height) ai.y = canvas.height - ai.height;
+            if (ai.y > FIELD_HEIGHT - ai.height) ai.y = FIELD_HEIGHT - ai.height;
 
             // Collision with top and bottom walls
-            if (ball.y + ball.radius > canvas.height || ball.y - ball.radius < 0) {
+            if (ball.y + ball.radius > FIELD_HEIGHT || ball.y - ball.radius < 0) {
                 ball.velocityY = -ball.velocityY;
             }
 
             // Determine which paddle checking collision with
-            let paddle = (ball.x < canvas.width / 2) ? player : ai;
+            let paddle = (ball.x < FIELD_WIDTH / 2) ? player : ai;
 
-            if (collision(ball, paddle)) {
+            // Only hit while approaching, or a thick paddle would count one hit on several frames
+            let approaching = (paddle === player) ? ball.velocityX < 0 : ball.velocityX > 0;
+
+            if (approaching && collision(ball, paddle)) {
                 // Calculate hit point and bounce angle
                 let collidePoint = (ball.y - (paddle.y + paddle.height / 2));
                 collidePoint = collidePoint / (paddle.height / 2); // Normalize -1 to 1
@@ -182,7 +384,7 @@
                 let angleRad = collidePoint * Math.PI / 4; // 45 degree max angle
 
                 // Change X direction
-                let direction = (ball.x < canvas.width / 2) ? 1 : -1;
+                let direction = (ball.x < FIELD_WIDTH / 2) ? 1 : -1;
                 
                 ball.velocityX = direction * ball.speed * Math.cos(angleRad);
                 ball.velocityY = ball.speed * Math.sin(angleRad);
@@ -195,38 +397,83 @@
             if (ball.x - ball.radius < 0) {
                 // AI scores
                 ai.score++;
-                document.getElementById("aiScore").innerText = ai.score;
                 resetBall();
-            } else if (ball.x + ball.radius > canvas.width) {
+            } else if (ball.x + ball.radius > FIELD_WIDTH) {
                 // Player scores
                 player.score++;
-                document.getElementById("playerScore").innerText = player.score;
                 resetBall();
+            }
+        }
+
+        function drawScore() {
+            ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+            ctx.fillStyle = "#555";
+            ctx.font = "bold " + Math.round(56 * view.scale) + "px 'Courier New', Courier, monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+
+            const width = canvas.width / view.dpr;
+            const height = canvas.height / view.dpr;
+            if (view.rotated) {
+                // Player is at the bottom
+                ctx.fillText(ai.score, width / 2, height * 0.25);
+                ctx.fillText(player.score, width / 2, height * 0.75);
+            } else {
+                ctx.fillText(player.score, width * 0.25, height * 0.2);
+                ctx.fillText(ai.score, width * 0.75, height * 0.2);
             }
         }
 
         // Render game
         function render() {
-            // Clear canvas
-            drawRect(0, 0, canvas.width, canvas.height, "BLACK");
-            
+            // Score sits behind everything so it never hides the ball or paddles
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.fillStyle = "BLACK";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            drawScore();
+
+            const s = view.scale * view.dpr;
+            if (view.rotated) {
+                // Field x runs from the bottom of the screen to the top; field y runs left to right
+                ctx.setTransform(0, -s, s, 0, 0, FIELD_WIDTH * s);
+            } else {
+                ctx.setTransform(s, 0, 0, s, 0, 0);
+            }
+
             drawNet();
-            
+
             // Draw paddles and ball
             drawRect(player.x, player.y, player.width, player.height, player.color);
             drawRect(ai.x, ai.y, ai.width, ai.height, ai.color);
             drawCircle(ball.x, ball.y, ball.radius, ball.color);
         }
 
-        // Game loop
-        function game() {
-            update();
+        // Game loop: fixed 60 updates per second, so 90/120Hz phones don't run the game faster
+        const STEP = 1000 / 60;
+        let running = !isTouchDevice; // Touch devices wait for the tap that unlocks the sensor
+        let lastTime = null;
+        let pending = 0;
+
+        function game(time) {
+            if (running && lastTime !== null) {
+                pending = Math.min(pending + time - lastTime, 100); // Don't catch up after a pause
+                while (pending >= STEP) {
+                    update();
+                    pending -= STEP;
+                }
+            }
+            lastTime = time;
             render();
             requestAnimationFrame(game);
         }
 
         // Start game
-        game();
+        if (isTouchDevice) document.body.classList.add("touch");
+        if (!window.isSecureContext) document.body.classList.add("noTilt"); // Browsers block the sensor on HTTP
+        new ResizeObserver(resize).observe(stageArea);
+        window.addEventListener("orientationchange", resize);
+        resize();
+        requestAnimationFrame(game);
     </script>
 </body>
 </html>
